@@ -12,6 +12,7 @@
 <body>
   <!-- Nav Styling -->
   <nav class="navbar">
+    <button class="menu-toggle" type="button" aria-label="Open navigation" aria-expanded="false"><i class="fas fa-bars"></i></button>
     <!-- Logo -->
     <div class="logo">
       <img src="img/LogoImage.png" alt="Bum Flex Logo">
@@ -29,19 +30,19 @@
       </div>
 
       <a href="about.html"><i class="fas fa-star"></i> New Arrivals</a>
-      <a href="contact.html"><i class="fas fa-phone"></i> Contact Us</a>
+      <a href="#contact"><i class="fas fa-phone"></i> Contact Me</a>
       <a href="products.html"><i class="fas fa-comments"></i> Reviews</a>
       <!-- Search Bar -->
-      <form class="Search">
-        <input type="text" placeholder="Search for your ideal item">
+      <form class="Search" role="search">
+        <input type="search" placeholder="Search for your ideal item" aria-label="Search products">
       </form>
     </div>
 
     <div class="Registeration">
-      <a href="#"><i class="fas fa-user"></i> Login</a>
-      <button class="signup">Signup</button>
-      <a href="#">
+      <a href="#login" class="login-link"><i class="fas fa-user"></i> Login</a>
+      <a href="#cart" class="cart-link" aria-label="Open shopping cart">
         <i class="fas fa-shopping-cart"></i>
+        <span class="cart-count" aria-live="polite">0</span>
       </a>
     </div>
   </nav>
@@ -148,6 +149,26 @@
   </section>
   <!-- End of Landing Page -->
 
+  <section class="contact-section" id="contact" aria-labelledby="contact-heading">
+    <div class="contact-panel">
+      <h2 id="contact-heading">Contact Me</h2>
+      <p>Have a question? Send us a message and we’ll get back to you.</p>
+      <form id="contact-form" method="post">
+        <label for="contact-name">Name</label>
+        <input id="contact-name" name="name" type="text" autocomplete="name" required>
+
+        <label for="contact-email">Email</label>
+        <input id="contact-email" name="email" type="email" autocomplete="email" required>
+
+        <label for="contact-message">Message</label>
+        <textarea id="contact-message" name="message" rows="5" required></textarea>
+
+        <p class="contact-status" role="status" aria-live="polite"></p>
+        <button class="shop-action" type="submit">Send Message</button>
+      </form>
+    </div>
+  </section>
+
   <!-- Footer Page -->
    <footer class="Footer-section">
     <div class="Footer-content">
@@ -199,7 +220,10 @@
    </footer>
 
   
-
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="js/supabase-config.js"></script>
+<script src="js/script.js" defer></script>
+<script src="js/contact.js" defer></script>
 
 </body>
 
