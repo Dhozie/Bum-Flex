@@ -9,6 +9,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     return { id: seedIds[index] || `bum-flex-${index + 1}`, name, price: numericPrice, image, description: `${name}, designed for comfortable movement and everyday style.` };
   });
   const cart = new Map();
+  const cartStoragePrefix = 'cart_';
   const money = amount => `\u20A6${amount.toLocaleString('en-NG')}`;
   const notice = document.createElement('p');
   notice.className = 'shop-notice';
@@ -71,11 +72,51 @@ document.addEventListener('DOMContentLoaded', async () => {
     dialog.classList.remove('is-open');
     document.body.classList.remove('dialog-open');
   }
+  function showMessageModal(message) {
+    openDialog('<section class="auth-content"><h2 class="modal-message" aria-live="polite"></h2></section>');
+    dialogContent.querySelector('.modal-message').textContent = message;
+  }
   const loginLink = document.querySelector('.login-link');
   let currentUser = null;
+  let authEpoch = 0;
   const pendingGoogleLoginKey = 'bum-flex-google-login-pending';
 
+  function saveCartForUser(userId = currentUser?.id, items = [...cart.values()]) {
+    if (!userId) return;
+    try {
+      localStorage.setItem(`${cartStoragePrefix}${userId}`, JSON.stringify(items));
+    } catch (error) {
+      console.error('Could not save the Bum Flex cart:', error);
+    }
+  }
+
+  function loadCartForUser(userId) {
+    cart.clear();
+    try {
+      const savedCart = JSON.parse(localStorage.getItem(`${cartStoragePrefix}${userId}`) || '[]');
+      if (Array.isArray(savedCart)) {
+        savedCart.forEach(item => {
+          const quantity = Number(item?.quantity);
+          if (item?.id && Number.isFinite(quantity) && quantity > 0) {
+            cart.set(String(item.id), { ...item, quantity });
+          }
+        });
+      }
+    } catch (error) {
+      console.error('Could not restore the Bum Flex cart:', error);
+    }
+  }
+
   function updateLoginLink(user) {
+    const previousUserId = currentUser?.id;
+    const nextUserId = user?.id;
+    if (previousUserId !== nextUserId) {
+      if (previousUserId) saveCartForUser(previousUserId);
+      authEpoch += 1;
+      cart.clear();
+      if (nextUserId) loadCartForUser(nextUserId);
+      updateCount();
+    }
     currentUser = user || null;
     const displayName = user?.user_metadata?.full_name
       || user?.user_metadata?.name
@@ -87,6 +128,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     loginLink.querySelector('i').className = 'fas fa-user';
     loginLink.append(document.createTextNode(user ? `Hi, ${firstName}` : ' Login'));
     loginLink.setAttribute('aria-label', user ? `Account for ${displayName}` : 'Login with Google');
+  }
+
+  function requireAuthenticatedUser() {
+    if (currentUser?.id && supabaseClient?.auth) return true;
+    showGoogleLogin('Please log in to continue.');
+    return false;
   }
 
   function showGoogleLogin(message = '') {
@@ -103,14 +150,22 @@ document.addEventListener('DOMContentLoaded', async () => {
       const logoutButton = dialogContent.querySelector('.logout-button');
       logoutButton.disabled = true;
       try {
+        // Clear the active identity and cart as soon as logout is requested.
+        updateLoginLink(null);
         const { error } = await supabaseClient.auth.signOut();
         if (error) throw error;
         closeDialog();
         notice.textContent = 'You have been signed out.';
       } catch (error) {
         console.error('Could not sign out of Bum Flex:', error);
+        try {
+          const { data } = await supabaseClient.auth.getSession();
+          updateLoginLink(data.session?.user);
+        } catch (sessionError) {
+          console.error('Could not restore the Bum Flex session after logout failed:', sessionError);
+        }
         dialogContent.querySelector('.auth-message').textContent = 'Logout failed. Please try again.';
-        logoutButton.disabled = false;
+        dialogContent.querySelector('.logout-button')?.removeAttribute('disabled');
       }
     });
   }
@@ -161,7 +216,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (session?.user && sessionStorage.getItem(pendingGoogleLoginKey) === 'true') {
         sessionStorage.removeItem(pendingGoogleLoginKey);
         closeDialog();
-        notice.textContent = 'Successfully signed in with Google.';
+        showMessageModal('Successfully signed in with Google');
       } else if (event === 'SIGNED_OUT') {
         notice.textContent = 'You have been signed out.';
       }
@@ -172,7 +227,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       updateLoginLink(data.session?.user);
       if (data.session?.user && sessionStorage.getItem(pendingGoogleLoginKey) === 'true') {
         sessionStorage.removeItem(pendingGoogleLoginKey);
-        notice.textContent = 'Successfully signed in with Google.';
+        showMessageModal('Successfully signed in with Google');
       }
     } catch (error) {
       console.error('Could not restore the Bum Flex sign-in session:', error);
@@ -190,9 +245,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   function showProduct(product) {
     openDialog(`<section class="product-detail"><img src="${product.image}" alt="${product.name}"><div><h2>${product.name}</h2><p class="detail-price">${money(product.price)}</p><p>${product.description}</p><label>Quantity <input class="detail-quantity" type="number" min="1" value="1"></label><button class="shop-action detail-add" type="button">Add to Cart</button></div></section>`);
     dialogContent.querySelector('.detail-add').addEventListener('click', () => {
+      if (!requireAuthenticatedUser()) return;
       const quantity = Math.max(1, Number(dialogContent.querySelector('.detail-quantity').value) || 1);
       addToCart(product, quantity);
-      closeDialog();
     });
   }
 
@@ -210,13 +265,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.querySelector('.cart-count').textContent = [...cart.values()].reduce((sum, item) => sum + item.quantity, 0);
   }
   function addToCart(product, quantity = 1) {
+    if (!requireAuthenticatedUser()) return;
     const existing = cart.get(product.id);
     if (existing) existing.quantity += quantity;
     else cart.set(product.id, { ...product, quantity });
+    saveCartForUser();
     updateCount();
-    notice.textContent = `${product.name} added to cart.`;
+    showMessageModal('Product added to cart');
   }
   function showCart() {
+    if (!requireAuthenticatedUser()) return;
+    const cartOwnerId = currentUser.id;
+    const cartOwnerEpoch = authEpoch;
     if (!cart.size) {
       openDialog('<h2>Your Cart</h2><p class="empty-cart">Cart is empty.</p>');
       return;
@@ -225,23 +285,37 @@ document.addEventListener('DOMContentLoaded', async () => {
     const total = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
     openDialog(`<h2>Your Cart</h2><div class="cart-items">${items.map(item => `<article class="cart-item" data-id="${item.id}"><img src="${item.image}" alt=""><div class="cart-item-info"><strong>${item.name}</strong><span>${money(item.price)} each</span><div class="quantity-controls"><button type="button" data-action="decrease" aria-label="Decrease ${item.name}">−</button><span>${item.quantity}</span><button type="button" data-action="increase" aria-label="Increase ${item.name}">+</button><button type="button" data-action="remove">Remove</button></div></div><strong>${money(item.price * item.quantity)}</strong></article>`).join('')}</div><p class="cart-total">Subtotal: <strong>${money(total)}</strong></p><p class="cart-total">Total: <strong>${money(total)}</strong></p><button class="shop-action checkout-start" type="button">Checkout</button>`);
     dialogContent.querySelectorAll('.cart-item button').forEach(button => button.addEventListener('click', () => {
+      if (!requireAuthenticatedUser()) return;
+      if (currentUser.id !== cartOwnerId || authEpoch !== cartOwnerEpoch) {
+        showCart();
+        return;
+      }
       const row = button.closest('.cart-item');
       const item = cart.get(row.dataset.id);
       if (button.dataset.action === 'increase') item.quantity += 1;
       if (button.dataset.action === 'decrease') item.quantity -= 1;
       if (button.dataset.action === 'remove' || item.quantity <= 0) cart.delete(row.dataset.id);
+      saveCartForUser();
       updateCount();
       showCart();
     }));
     dialogContent.querySelector('.checkout-start').addEventListener('click', showCheckout);
   }
   function showCheckout() {
+    if (!requireAuthenticatedUser()) return;
     if (!cart.size) return showCart();
+    const checkoutUserId = currentUser.id;
+    const checkoutAuthEpoch = authEpoch;
     const items = [...cart.values()];
     const total = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
     openDialog(`<h2>Checkout</h2><div class="checkout-summary">${items.map(item => `<p>${item.name} × ${item.quantity} <strong>${money(item.price * item.quantity)}</strong></p>`).join('')}<p class="cart-total">Total <strong>${money(total)}</strong></p></div><form class="checkout-form"><label>Customer name<input name="name" required autocomplete="name"></label><label>Email<input name="email" type="email" required autocomplete="email"></label><label>Phone number<input name="phone" type="tel" required autocomplete="tel"></label><label>Delivery address<textarea name="address" required autocomplete="street-address"></textarea></label><p class="checkout-error" aria-live="polite"></p><button class="shop-action" type="submit">Place Order</button></form>`);
     dialogContent.querySelector('.checkout-form').addEventListener('submit', event => {
       event.preventDefault();
+      if (!requireAuthenticatedUser()) return;
+      if (currentUser.id !== checkoutUserId || authEpoch !== checkoutAuthEpoch) {
+        dialogContent.querySelector('.checkout-error').textContent = 'Your account changed. Please review your cart and checkout again.';
+        return;
+      }
       const form = event.currentTarget;
       if (!form.reportValidity()) {
         dialogContent.querySelector('.checkout-error').textContent = 'Order details required.';
@@ -261,17 +335,26 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function submitOrder(form) {
     const errorMessage = dialogContent.querySelector('.checkout-error');
     const submitButton = form.querySelector('button[type="submit"]');
+    if (!requireAuthenticatedUser()) return;
     if (!supabaseClient) {
       errorMessage.textContent = 'Order could not be saved: Supabase is not configured. Your cart is still here.';
       return;
     }
     const values = new FormData(form);
+    const submittingUserId = currentUser.id;
+    const submittingAuthEpoch = authEpoch;
     const items = [...cart.values()];
     const total = items.reduce((sum, item) => sum + Math.round(Number(item.price) * 100) * item.quantity, 0) / 100;
     submitButton.disabled = true;
     submitButton.textContent = 'Saving order…';
     errorMessage.textContent = '';
     try {
+      const { data: sessionData, error: sessionError } = await supabaseClient.auth.getSession();
+      if (sessionError) throw sessionError;
+      if (!sessionData.session?.user?.id || sessionData.session.user.id !== submittingUserId
+        || currentUser?.id !== submittingUserId || authEpoch !== submittingAuthEpoch) {
+        throw new Error('Please log in to continue.');
+      }
       const { data, error } = await supabaseClient.rpc('place_bum_flex_order', {
         p_customer_name: values.get('name').trim(),
         p_customer_email: values.get('email').trim(),
@@ -282,13 +365,20 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
       if (error) throw error;
       if (!data) throw new Error('The database did not return an order ID.');
-      cart.clear();
-      updateCount();
+      if (currentUser?.id === submittingUserId) {
+        cart.clear();
+        saveCartForUser(submittingUserId);
+        updateCount();
+      } else {
+        saveCartForUser(submittingUserId, []);
+      }
       openDialog(`<h2>Order placed successfully</h2><p>Your order was saved. Reference: ${data}</p><button class="shop-action done-button" type="button">Continue shopping</button>`);
       dialogContent.querySelector('.done-button').addEventListener('click', closeDialog);
     } catch (error) {
       console.error('Could not submit Bum Flex order:', error);
-      errorMessage.textContent = `Order could not be saved. ${error.message || 'Please try again.'} Your cart is still here.`;
+      errorMessage.textContent = error.message === 'Please log in to continue.'
+        ? error.message
+        : `Order could not be saved. ${error.message || 'Please try again.'} Your cart is still here.`;
       submitButton.disabled = false;
       submitButton.textContent = 'Place Order';
     }
