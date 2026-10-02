@@ -182,9 +182,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     message.textContent = '';
     try {
       sessionStorage.setItem(pendingGoogleLoginKey, 'true');
+      const redirectTo = ['localhost', '127.0.0.1'].includes(window.location.hostname)
+        ? window.location.origin
+        : 'https://bumflex.netlify.app/';
       const { error } = await supabaseClient.auth.signInWithOAuth({
         provider: 'google',
-        options: { redirectTo: window.location.origin }
+        options: { redirectTo }
       });
       if (error) throw error;
     } catch (error) {
