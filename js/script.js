@@ -9,7 +9,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     return { id: seedIds[index] || `bum-flex-${index + 1}`, name, price: numericPrice, image, description: `${name}, designed for comfortable movement and everyday style.` };
   });
   const cart = new Map();
-  const cartStoragePrefix = 'cart_';
   const money = amount => `\u20A6${amount.toLocaleString('en-NG')}`;
   const notice = document.createElement('p');
   notice.className = 'shop-notice';
@@ -79,31 +78,61 @@ document.addEventListener('DOMContentLoaded', async () => {
   const loginLink = document.querySelector('.login-link');
   let currentUser = null;
   let authEpoch = 0;
+  let currentCartId = null;
+  let cartRealtimeChannel = null;
+  let subscribedCartId = null;
   const pendingGoogleLoginKey = 'bum-flex-google-login-pending';
 
-  function saveCartForUser(userId = currentUser?.id, items = [...cart.values()]) {
-    if (!userId) return;
-    try {
-      localStorage.setItem(`${cartStoragePrefix}${userId}`, JSON.stringify(items));
-    } catch (error) {
-      console.error('Could not save the Bum Flex cart:', error);
-    }
+  async function ensureCartForUser(userId = currentUser?.id) {
+    if (!userId || !supabaseClient) throw new Error('Please log in to continue.');
+    const { data, error } = await supabaseClient.from('carts')
+      .upsert({ user_id: userId }, { onConflict: 'user_id' })
+      .select('id').single();
+    if (error) throw error;
+    if (currentUser?.id !== userId) throw new Error('Your account changed. Please try again.');
+    currentCartId = data.id;
+    return data.id;
   }
 
-  function loadCartForUser(userId) {
+  async function loadCartForUser(userId) {
     cart.clear();
-    try {
-      const savedCart = JSON.parse(localStorage.getItem(`${cartStoragePrefix}${userId}`) || '[]');
-      if (Array.isArray(savedCart)) {
-        savedCart.forEach(item => {
-          const quantity = Number(item?.quantity);
-          if (item?.id && Number.isFinite(quantity) && quantity > 0) {
-            cart.set(String(item.id), { ...item, quantity });
+    currentCartId = null;
+    const cartId = await ensureCartForUser(userId);
+    const { data, error } = await supabaseClient.from('cart_items')
+      .select('product_id,quantity,products(id,name,price,image,description)')
+      .eq('cart_id', cartId);
+    if (error) throw error;
+    data.forEach(row => {
+      if (row.products) cart.set(row.product_id, { ...row.products, price: Number(row.products.price), quantity: row.quantity });
+    });
+    updateCount();
+    if (subscribedCartId !== cartId) {
+      if (cartRealtimeChannel) await supabaseClient.removeChannel(cartRealtimeChannel);
+      subscribedCartId = cartId;
+      cartRealtimeChannel = supabaseClient
+        .channel(`website-cart-${cartId}`)
+        .on('postgres_changes', {
+          event: '*', schema: 'public', table: 'cart_items', filter: `cart_id=eq.${cartId}`
+        }, () => {
+          if (currentUser?.id === userId) {
+            loadCartForUser(userId).then(() => {
+              if (dialog.classList.contains('is-open') && dialogContent.querySelector('h2')?.textContent === 'Your Cart') renderCart();
+            }).catch(error => console.error('Could not refresh the shared Bum Flex cart:', error));
+          }
+        })
+        .subscribe((status, error) => {
+          if (status === 'SUBSCRIBED') {
+            // Refresh on initial subscription and every successful reconnect.
+            if (currentUser?.id === userId) {
+              loadCartForUser(userId).then(() => {
+                if (dialog.classList.contains('is-open') && dialogContent.querySelector('h2')?.textContent === 'Your Cart') renderCart();
+              }).catch(refreshError => console.error('Could not refresh the shared Bum Flex cart after subscribing:', refreshError));
+            }
+          } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+            console.warn(`Bum Flex cart realtime subscription ${status.toLowerCase()}:`, error);
+            // The focus handler also refreshes the cart if realtime is unavailable.
           }
         });
-      }
-    } catch (error) {
-      console.error('Could not restore the Bum Flex cart:', error);
     }
   }
 
@@ -111,13 +140,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     const previousUserId = currentUser?.id;
     const nextUserId = user?.id;
     if (previousUserId !== nextUserId) {
-      if (previousUserId) saveCartForUser(previousUserId);
       authEpoch += 1;
       cart.clear();
-      if (nextUserId) loadCartForUser(nextUserId);
+      currentCartId = null;
       updateCount();
+      if (cartRealtimeChannel) {
+        void supabaseClient?.removeChannel(cartRealtimeChannel);
+        cartRealtimeChannel = null;
+        subscribedCartId = null;
+      }
     }
     currentUser = user || null;
+    if (nextUserId && previousUserId !== nextUserId) {
+      loadCartForUser(nextUserId).catch(error => {
+        console.error('Could not load the shared Bum Flex cart:', error);
+        notice.textContent = 'Your shared cart could not be loaded. Please try again.';
+      });
+    }
     const displayName = user?.user_metadata?.full_name
       || user?.user_metadata?.name
       || user?.user_metadata?.given_name
@@ -129,6 +168,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     loginLink.append(document.createTextNode(user ? `Hi, ${firstName}` : ' Login'));
     loginLink.setAttribute('aria-label', user ? `Account for ${displayName}` : 'Login with Google');
   }
+
+  // Refresh after returning to the page in case realtime was briefly disconnected.
+  window.addEventListener('focus', () => {
+    if (currentUser?.id) loadCartForUser(currentUser.id).catch(error => console.error('Could not refresh the shared Bum Flex cart:', error));
+  });
 
   function requireAuthenticatedUser() {
     if (currentUser?.id && supabaseClient?.auth) return true;
@@ -267,16 +311,41 @@ document.addEventListener('DOMContentLoaded', async () => {
   function updateCount() {
     document.querySelector('.cart-count').textContent = [...cart.values()].reduce((sum, item) => sum + item.quantity, 0);
   }
-  function addToCart(product, quantity = 1) {
+  async function addToCart(product, quantity = 1) {
     if (!requireAuthenticatedUser()) return;
-    const existing = cart.get(product.id);
-    if (existing) existing.quantity += quantity;
-    else cart.set(product.id, { ...product, quantity });
-    saveCartForUser();
+    try {
+      const cartId = currentCartId || await ensureCartForUser();
+      const existing = cart.get(product.id);
+      const nextQuantity = (existing?.quantity || 0) + quantity;
+      const { error } = await supabaseClient.from('cart_items').upsert(
+        { cart_id: cartId, product_id: product.id, quantity: nextQuantity },
+        { onConflict: 'cart_id,product_id' }
+      );
+      if (error) throw error;
+      cart.set(product.id, { ...product, quantity: nextQuantity });
+    } catch (error) {
+      console.error('Could not update the shared Bum Flex cart:', error);
+      notice.textContent = 'The item could not be added. Please try again.';
+      return;
+    }
     updateCount();
     showMessageModal('Product added to cart');
   }
-  function showCart() {
+  async function showCart() {
+    if (!requireAuthenticatedUser()) return;
+    const cartOwnerId = currentUser.id;
+    try {
+      await loadCartForUser(cartOwnerId);
+    } catch (error) {
+      console.error('Could not load the latest Bum Flex cart before displaying it:', error);
+      notice.textContent = 'Your shared cart could not be loaded. Please try again.';
+      return;
+    }
+    if (currentUser?.id !== cartOwnerId) return;
+    renderCart();
+  }
+
+  function renderCart() {
     if (!requireAuthenticatedUser()) return;
     const cartOwnerId = currentUser.id;
     const cartOwnerEpoch = authEpoch;
@@ -287,27 +356,45 @@ document.addEventListener('DOMContentLoaded', async () => {
     const items = [...cart.values()];
     const total = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
     openDialog(`<h2>Your Cart</h2><div class="cart-items">${items.map(item => `<article class="cart-item" data-id="${item.id}"><img src="${item.image}" alt=""><div class="cart-item-info"><strong>${item.name}</strong><span>${money(item.price)} each</span><div class="quantity-controls"><button type="button" data-action="decrease" aria-label="Decrease ${item.name}">−</button><span>${item.quantity}</span><button type="button" data-action="increase" aria-label="Increase ${item.name}">+</button><button type="button" data-action="remove">Remove</button></div></div><strong>${money(item.price * item.quantity)}</strong></article>`).join('')}</div><p class="cart-total">Subtotal: <strong>${money(total)}</strong></p><p class="cart-total">Total: <strong>${money(total)}</strong></p><button class="shop-action checkout-start" type="button">Checkout</button>`);
-    dialogContent.querySelectorAll('.cart-item button').forEach(button => button.addEventListener('click', () => {
+    dialogContent.querySelectorAll('.cart-item button').forEach(button => button.addEventListener('click', async () => {
       if (!requireAuthenticatedUser()) return;
       if (currentUser.id !== cartOwnerId || authEpoch !== cartOwnerEpoch) {
-        showCart();
+        void showCart();
         return;
       }
       const row = button.closest('.cart-item');
       const item = cart.get(row.dataset.id);
-      if (button.dataset.action === 'increase') item.quantity += 1;
-      if (button.dataset.action === 'decrease') item.quantity -= 1;
-      if (button.dataset.action === 'remove' || item.quantity <= 0) cart.delete(row.dataset.id);
-      saveCartForUser();
+      const remove = button.dataset.action === 'remove' || (button.dataset.action === 'decrease' && item.quantity <= 1);
+      const nextQuantity = item.quantity + (button.dataset.action === 'increase' ? 1 : button.dataset.action === 'decrease' ? -1 : 0);
+      try {
+        const { error } = remove
+          ? await supabaseClient.from('cart_items').delete().eq('cart_id', currentCartId).eq('product_id', item.id)
+          : await supabaseClient.from('cart_items').update({ quantity: nextQuantity }).eq('cart_id', currentCartId).eq('product_id', item.id);
+        if (error) throw error;
+        if (remove) cart.delete(row.dataset.id);
+        else item.quantity = nextQuantity;
+      } catch (error) {
+        console.error('Could not update the shared Bum Flex cart:', error);
+        notice.textContent = 'The cart could not be updated. Please try again.';
+        return;
+      }
       updateCount();
-      showCart();
+      void showCart();
     }));
     dialogContent.querySelector('.checkout-start').addEventListener('click', showCheckout);
   }
-  function showCheckout() {
+  async function showCheckout() {
     if (!requireAuthenticatedUser()) return;
-    if (!cart.size) return showCart();
     const checkoutUserId = currentUser.id;
+    try {
+      await loadCartForUser(checkoutUserId);
+    } catch (error) {
+      console.error('Could not load the latest Bum Flex cart before checkout:', error);
+      notice.textContent = 'Your shared cart could not be loaded. Please try checkout again.';
+      return;
+    }
+    if (currentUser?.id !== checkoutUserId) return;
+    if (!cart.size) return showCart();
     const checkoutAuthEpoch = authEpoch;
     const items = [...cart.values()];
     const total = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
@@ -330,12 +417,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         dialogContent.querySelector('.checkout-error').textContent = 'Order details required. Please complete every field.';
         return;
       }
-      submitOrder(form);
+      submitOrder(form, items);
     });
   }
 
   // Save an order and its items through one database function so either both records are written or neither is.
-  async function submitOrder(form) {
+  async function submitOrder(form, reviewedItems) {
     const errorMessage = dialogContent.querySelector('.checkout-error');
     const submitButton = form.querySelector('button[type="submit"]');
     if (!requireAuthenticatedUser()) return;
@@ -346,8 +433,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     const values = new FormData(form);
     const submittingUserId = currentUser.id;
     const submittingAuthEpoch = authEpoch;
-    const items = [...cart.values()];
-    const total = items.reduce((sum, item) => sum + Math.round(Number(item.price) * 100) * item.quantity, 0) / 100;
     submitButton.disabled = true;
     submitButton.textContent = 'Saving order…';
     errorMessage.textContent = '';
@@ -358,6 +443,19 @@ document.addEventListener('DOMContentLoaded', async () => {
         || currentUser?.id !== submittingUserId || authEpoch !== submittingAuthEpoch) {
         throw new Error('Please log in to continue.');
       }
+      await loadCartForUser(submittingUserId);
+      if (currentUser?.id !== submittingUserId || authEpoch !== submittingAuthEpoch) {
+        throw new Error('Please log in to continue.');
+      }
+      const items = [...cart.values()];
+      const cartChanged = items.length !== reviewedItems.length || items.some(item => {
+        const reviewedItem = reviewedItems.find(reviewed => reviewed.id === item.id);
+        return !reviewedItem || reviewedItem.quantity !== item.quantity || reviewedItem.price !== item.price;
+      });
+      if (cartChanged) {
+        throw new Error('Your cart changed while checkout was open. Close checkout, reopen your cart, and review the latest items before placing the order.');
+      }
+      const total = items.reduce((sum, item) => Math.round(Number(item.price) * 100) * item.quantity, 0) / 100;
       const { data, error } = await supabaseClient.rpc('place_bum_flex_order', {
         p_customer_name: values.get('name').trim(),
         p_customer_email: values.get('email').trim(),
@@ -368,14 +466,27 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
       if (error) throw error;
       if (!data) throw new Error('The database did not return an order ID.');
-      if (currentUser?.id === submittingUserId) {
-        cart.clear();
-        saveCartForUser(submittingUserId);
-        updateCount();
-      } else {
-        saveCartForUser(submittingUserId, []);
+      let emailSent = true;
+      try {
+        const { error: emailError } = await supabaseClient.functions.invoke('checkout-confirmation', { body: { order_id: data } });
+        if (emailError) throw emailError;
+      } catch (emailError) {
+        emailSent = false;
+        console.error('Order succeeded but confirmation email failed:', emailError);
       }
-      openDialog(`<h2>Order placed successfully</h2><p>Your order was saved. Reference: ${data}</p><button class="shop-action done-button" type="button">Continue shopping</button>`);
+      let cartCleared = true;
+      if (currentUser?.id === submittingUserId && currentCartId) {
+        const { error: clearError } = await supabaseClient.from('cart_items').delete().eq('cart_id', currentCartId);
+        if (clearError) {
+          cartCleared = false;
+          console.error('Order succeeded but shared cart clearing failed:', clearError);
+        }
+        cart.clear();
+        updateCount();
+      }
+      const emailMessage = emailSent ? ' A confirmation email was sent.' : ' The order succeeded, but we could not send the confirmation email.';
+      const cartMessage = cartCleared ? '' : ' Your order succeeded, but your saved cart could not be cleared.';
+      openDialog(`<h2>Order placed successfully</h2><p>Your order was saved. Reference: ${data}.${emailMessage}${cartMessage}</p><button class="shop-action done-button" type="button">Continue shopping</button>`);
       dialogContent.querySelector('.done-button').addEventListener('click', closeDialog);
     } catch (error) {
       console.error('Could not submit Bum Flex order:', error);
