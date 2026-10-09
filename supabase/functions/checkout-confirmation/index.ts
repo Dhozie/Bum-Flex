@@ -51,20 +51,18 @@ Deno.serve(async (request: Request) => {
       .single();
     if (orderError || !order) return response({ error: 'Order not found.' }, 404);
 
-    const recipient = user.email || order.customer_email;
+    const recipient = order.customer_email || user.email;
     if (!recipient) return response({ error: 'No email address is available for this account.' }, 400);
 
-    const email = new URLSearchParams({
-      from: mailgunFrom,
-      to: recipient,
-      subject: `Bum Flex order confirmation ${order.id}`,
-      text: `Hi ${order.customer_name},\n\nYour Bum Flex order has been received.\nOrder reference: ${order.id}\nTotal: ₦${Number(order.total_amount).toLocaleString('en-NG')}\n\nThank you for shopping with Bum Flex.`,
-    });
+    const email = new FormData();
+    email.set('from', mailgunFrom);
+    email.set('to', recipient);
+    email.set('subject', `Bum Flex order confirmation ${order.id}`);
+    email.set('text', `Hi ${order.customer_name},\n\nYour Bum Flex order has been received.\nOrder reference: ${order.id}\nTotal: ₦${Number(order.total_amount).toLocaleString('en-NG')}\n\nThank you for shopping with Bum Flex.`);
     const mailgunResponse = await fetch(`${mailgunApiBase.replace(/\/$/, '')}/v3/${encodeURIComponent(mailgunDomain)}/messages`, {
       method: 'POST',
       headers: {
         Authorization: `Basic ${btoa(`api:${mailgunApiKey}`)}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
       },
       body: email,
     });
