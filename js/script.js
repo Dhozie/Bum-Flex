@@ -455,7 +455,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (cartChanged) {
         throw new Error('Your cart changed while checkout was open. Close checkout, reopen your cart, and review the latest items before placing the order.');
       }
-      const total = items.reduce((sum, item) => Math.round(Number(item.price) * 100) * item.quantity, 0) / 100;
+      const total = items.reduce((sum, item) => sum + Math.round(Number(item.price) * 100) * item.quantity, 0) / 100;
       const { data, error } = await supabaseClient.rpc('place_bum_flex_order', {
         p_customer_name: values.get('name').trim(),
         p_customer_email: values.get('email').trim(),
